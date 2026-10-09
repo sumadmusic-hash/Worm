@@ -8,6 +8,10 @@ import {
 } from './types';
 import { getWeaponDef } from './weapons';
 import { getMaterialAt } from './terrain';
+import { drawWormSprite, drawWormShadow, preloadWormSprites, SPRITE_H as WORM_SPRITE_H } from './wormSprite';
+
+// Höhe des sichtbaren Wurms im Spiel (px) – Sprite wird skaliert
+const SPRITE_DRAW_H = WORM_SPRITE_H; // 100px natural, wird auf ~24px gescaled
 
 const TEAM_COLORS: Record<string, { body: string; dark: string; light: string; outline: string }> = {
   red: { body: '#cc3333', dark: '#881111', light: '#ff6666', outline: '#440000' },
@@ -45,6 +49,9 @@ export class GameRenderer {
     }
     this.terrainCtx = this.terrainCanvas.getContext('2d') as any;
     this.bgCtx = this.bgCanvas.getContext('2d') as any;
+
+    // Wurm-Sprites (SVG) vorladen, damit sie ab Frame 1 bereitstehen
+    preloadWormSprites();
     
     // Force initial terrain render
     this.terrainDirty = true;
@@ -324,13 +331,12 @@ export class GameRenderer {
   }
 
   private drawWorm(ctx: CanvasRenderingContext2D, worm: Worm, colorKey: string): void {
-    const colors = TEAM_COLORS[colorKey] || TEAM_COLORS.red;
     const { pos, facingRight, animState, animFrame } = worm;
     const dir = facingRight ? 1 : -1;
-    
+
     ctx.save();
     ctx.translate(pos.x, pos.y);
-    
+
     // Death animation
     if (animState === WormAnimState.DEATH) {
       const progress = 1 - worm.animTimer;
@@ -338,91 +344,66 @@ export class GameRenderer {
       ctx.translate(0, progress * 20);
       ctx.rotate(progress * Math.PI * dir);
     }
-    
+
     // Hit flash
     if (animState === WormAnimState.HIT) {
       ctx.globalAlpha = 0.7 + Math.sin(animFrame * 20) * 0.3;
     }
-    
-    // Body bob for idle
+
+    // Bobbing / breathing phase
+    let breathPhase = this.frameCount * 0.042; // ~2.5s Zyklus bei 60fps
     let bodyOffset = 0;
     if (animState === WormAnimState.IDLE) {
       bodyOffset = Math.sin(animFrame * 2) * 1;
     } else if (animState === WormAnimState.WALK) {
       bodyOffset = Math.sin(animFrame * 8) * 2;
+      breathPhase += Math.sin(animFrame * 8) * 0.5; // schneller beim Laufen
     }
-    
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath();
-    ctx.ellipse(0, WORM_RADIUS - 2, WORM_RADIUS * 0.8, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Body
-    ctx.fillStyle = colors.body;
-    ctx.strokeStyle = colors.outline;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(0, bodyOffset, WORM_RADIUS - 2, WORM_RADIUS, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    
-    // Body segments (worm texture)
-    ctx.strokeStyle = colors.dark;
-    ctx.lineWidth = 1;
-    for (let i = -2; i <= 2; i++) {
+
+    // --- SVG-basiertes Wurm-Sprite (ersetzt die prozedurale Zeichnung) ---
+    const spriteScale = (WORM_RADIUS * 2) / SPRITE_DRAW_H; // Figur ~24px hoch
+    const footY = WORM_RADIUS - 2 + bodyOffset;            // Fuß-Basislinie
+
+    // Bodenschatten mit pulsierendem Radial-Gradient (wie im Referenz-SVG)
+    drawWormShadow(ctx, 0, footY, spriteScale, breathPhase);
+
+    const drawn = drawWormSprite(
+      ctx,
+      colorKey,
+      0,
+      footY,
+      spriteScale,
+      facingRight,
+      breathPhase,
+      ctx.globalAlpha,
+    );
+
+    if (!drawn) {
+      // Fallback: einfache Silhouette bis das Sprite geladen ist
+      ctx.fillStyle = TEAM_COLORS[colorKey]?.body || TEAM_COLORS.red.body;
       ctx.beginPath();
-      ctx.arc(0, bodyOffset + i * 4, WORM_RADIUS - 4, -0.3, Math.PI + 0.3);
-      ctx.stroke();
+      ctx.ellipse(0, bodyOffset, WORM_RADIUS - 2, WORM_RADIUS, 0, 0, Math.PI * 2);
+      ctx.fill();
     }
-    
-    // Eyes
-    const eyeX = dir * 4;
-    const eyeY = -4 + bodyOffset;
-    
-    // Eye whites
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.ellipse(eyeX - 2, eyeY, 4, 5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(eyeX + 3, eyeY, 4, 5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Pupils
-    ctx.fillStyle = '#000';
-    const pupilOffset = dir * 1.5;
-    ctx.beginPath();
-    ctx.arc(eyeX - 2 + pupilOffset, eyeY, 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(eyeX + 3 + pupilOffset, eyeY, 2, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Helmet
-    ctx.fillStyle = colors.dark;
-    ctx.beginPath();
-    ctx.ellipse(0, -WORM_RADIUS + 2 + bodyOffset, WORM_RADIUS - 1, 6, 0, Math.PI, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = colors.outline;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    
+
+    // Positionen relativ zur neuen, höheren Sprite-Figur
+    const topY = footY - SPRITE_DRAW_H * spriteScale; // Oberkante Helm
+
     // Health bar
     if (worm.isAlive && worm.health < worm.maxHealth) {
-      const barWidth = 24;
+      const barWidth = 26;
       const barHeight = 4;
       const healthPct = worm.health / worm.maxHealth;
       
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(-barWidth / 2, -WORM_RADIUS - 12, barWidth, barHeight);
+      ctx.fillRect(-barWidth / 2, topY - 10, barWidth, barHeight);
       
       ctx.fillStyle = healthPct > 0.5 ? '#44ff44' : healthPct > 0.25 ? '#ffaa00' : '#ff3333';
-      ctx.fillRect(-barWidth / 2, -WORM_RADIUS - 12, barWidth * healthPct, barHeight);
+      ctx.fillRect(-barWidth / 2, topY - 10, barWidth * healthPct, barHeight);
       
       ctx.strokeStyle = '#000';
       ctx.lineWidth = 1;
-      ctx.strokeRect(-barWidth / 2, -WORM_RADIUS - 12, barWidth, barHeight);
+      ctx.strokeRect(-barWidth / 2, topY - 10, barWidth, barHeight);
     }
     
     // Stun indicator
@@ -430,7 +411,7 @@ export class GameRenderer {
       ctx.fillStyle = '#ffff00';
       ctx.font = '12px Arial';
       ctx.textAlign = 'center';
-      ctx.fillText('💫', 0, -WORM_RADIUS - 16);
+      ctx.fillText('💫', 0, topY - 14);
     }
     
     // Shield indicator
@@ -438,7 +419,7 @@ export class GameRenderer {
       ctx.strokeStyle = 'rgba(0,255,255,0.6)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(0, 0, WORM_RADIUS + 5, 0, Math.PI * 2);
+      ctx.arc(0, bodyOffset - 4, WORM_RADIUS + 8, 0, Math.PI * 2);
       ctx.stroke();
     }
     
@@ -449,12 +430,12 @@ export class GameRenderer {
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
-      ctx.arc(0, bodyOffset, WORM_RADIUS + 3, 0, Math.PI * 2);
+      ctx.arc(0, bodyOffset - 4, WORM_RADIUS + 6, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
       
       // Arrow above
-      const arrowY = -WORM_RADIUS - 18 + Math.sin(this.frameCount * 0.1) * 3;
+      const arrowY = topY - 22 + Math.sin(this.frameCount * 0.1) * 3;
       ctx.fillStyle = '#fff';
       ctx.beginPath();
       ctx.moveTo(0, arrowY + 8);
@@ -464,13 +445,13 @@ export class GameRenderer {
       ctx.fill();
     }
     
-    // Weapon display
+    // Weapon display – Icon neben der Figur statt auf dem Körper
     if (worm.isAlive && (currentWorm?.id === worm.id)) {
       const weaponDef = getWeaponDef(worm.currentWeapon);
-      ctx.font = '10px Arial';
+      ctx.font = '11px Arial';
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'center';
-      ctx.fillText(weaponDef.icon, dir * 12, bodyOffset + 2);
+      ctx.fillText(weaponDef.icon, dir * (WORM_RADIUS + 9), footY - 12 + bodyOffset);
     }
     
     // Name tag
